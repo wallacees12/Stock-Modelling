@@ -1,0 +1,38 @@
+Dear all,
+
+This is the assignment for the 2nd take home exam. I will announce the due date in class very soon. Please recall that this is not an "online class". If you choose to not come to lecture, that is fine with me, but you are then responsible for finding out what occurs in class.
+
+NOTE: I initially thought of asking you, in addition to the assignment below, to investigate the DEH estimator. I managed to get it to work, and have some updated notes on it in my document, and the simple codes for its computation. It indeed works better than Hill. I will later update my teaching notes document with further information on the POT estimator, courtesy of one of your fellow students, who is taking the lead in writing up some material on this very important topic in financial risk management. 
+
+
+For the 2nd assignment, you will fit a few IID models to the (25 or so) percentage log stock returns associated with the data set I sent you for the previous assignment, and compare in-sample fits. Be sure to know what is meant by "percentage log". See, e.g., my book on time-series if you are not in finance, and do not know how returns over time are typically calculated.
+
+Note that, in general, I have advocated comparing out-of-sample (OOS) measures that are relevant for the purpose of the modeling task, such as perhaps the VaR calculated on moving windows of data for a given set of portfolio weights (which could be chosen as "1/N" for simplicity) which is of interest from a risk-management perspective; or, portfolio performance and use of several measures, such as Sharpe, max-drawdown, Rachev-ratio, etc.. Such measures are of far more importance than in-sample fit measures.
+
+In our setup here, using daily data without accounting for time-varying volatility (e.g., GARCH), and without joint, multivariate modeling, our model is anyway rather misspecified. Also, our class concentrated on IID settings, and so we focus on use of IID models. Thus, you fit the entire sample (i.e., the entire stock return sequence, as opposed to use of moving windows). You use three measures for in-sample fit comparison: The obtained likelihood, and the AIC and BIC.
+
+Here are the models to use.
+
+1. A Gaussian distribution.
+
+2. A mixture of Gaussians, using 2 components, and 3 components.
+
+3. The density of random variable X arising as a weighted sum of K independent  chi2 r.v.s, each with one degree of freedom, K=2,3,4,5, and where X is endowed with a location parameter. Do not forget the location parameter, although we know its fitted value will be close to zero for reasons discussed in class, e.g., market efficiency. Note that the parameters are the weights, along with the location parameter.
+
+You compute the pdf (and, thus the likelihood) "exactly" (meaning, up to the tolerance possible from numeric integration) via c.f. inversion, as discussed in class.
+
+4. The location-scale noncentral t. In this case, an SPA is also available, but you do not use it. I also have an extremely fast and accurate approximation to the NCT, called DDA, but you do not need to use it. If you use the DDA, be sure to ALSO use the exact calculation via Matlab. Matlab has the NCT built-in as a vectorized calculation, and is fast enough for our purposes.
+
+The first task is to code the density evaluation of each model. Using these functions, the main task is to make a perfect program to compute the MLE of each, for a given data set (namely, the percentage log returns on the individual stocks of the data set I gave you). You use the entire time-series, as opposed to moving windows, as discussed above.
+
+Then, for the *first* of (percentage log) returns on the stock series I gave you, you are to (use the entire sample, and) plot with overlaid lines, a kernel density of the returns, and the fitted distributions. You do not need to do this for the remaining (24 or so) stocks.
+
+You then report on your findings. For each stock, you report the best model according to in-sample obtained likelihood, the best model according to AIC, and the best according to BIC. Obviously, do so in a nicely formatted table in LaTeX.
+
+Lastly, make a program that computes the 1% Value at Risk, based on an inputted parameter vector (which of course will be the MLE for our data sets) for each of the models we use, listed above. For each of the (25 or so) returns series, make a table of the 25 or so series (horizontal) and, vertical, report the 1%-VaR for each of the models. Compute the empirical sample VaR (see my VaR notes I lectured on) for each of the time series and report it in the first entry of your table. Among the remaining models, use, for each of the stock return series, bold face to indicate which has the closest value to the empirical VaR.
+
+As mentioned above, in real life, VaR comparisons across models would be done using moving windows (and more sophisticated models), in order to assess which model performs the best with respect to tail risk measures. And one would use some of the testing procedures for VaR, e.g., Christofferson's test.
+
+
+Best, Marc
+
