@@ -27,13 +27,15 @@ def load_results(path="results.pkl"):
 # LaTeX VaR Table
 # =============================================================================
 
-def generate_var_latex(df_var):
+def generate_var_latex(df_var, split_at=13):
     """
-    Generate LaTeX VaR table:
-    - Rows = models
-    - Columns = stocks  
-    - Empirical VaR in first row
-    - Bold = model closest to empirical VaR for each stock
+    Generate LaTeX VaR tables split into two parts:
+    - Part 1: Stocks 0 to split_at-1
+    - Part 2: Stocks split_at to end
+    
+    Rows = models, Columns = stocks  
+    Empirical VaR in first row
+    Bold = model closest to empirical VaR for each stock
     """
     stocks = df_var['Stock'].tolist()
     
@@ -79,49 +81,72 @@ def generate_var_latex(df_var):
                     best_model = mc
         closest[stock] = best_model
     
-    # Build LaTeX
-    lines = []
-    col_spec = 'l' + 'r' * len(stocks)
-    
-    lines.append(r'\begin{table}[ht]')
-    lines.append(r'\centering')
-    lines.append(r'\small')
-    lines.append(r'\begin{tabular}{' + col_spec + r'}')
-    lines.append(r'\toprule')
-    
-    # Header
-    header = ['Model'] + [str(s) for s in stocks]
-    lines.append(' & '.join(header) + r' \\')
-    lines.append(r'\midrule')
-    
-    # Empirical row
-    row_vals = [get_label(emp_col)]
-    for _, row in df_var.iterrows():
-        row_vals.append(fmt(row[emp_col]))
-    lines.append(' & '.join(row_vals) + r' \\')
-    
-    # Model rows
-    for mc in model_cols:
-        row_vals = [get_label(mc)]
-        for _, row in df_var.iterrows():
-            stock = row['Stock']
-            val = row[mc]
-            s = fmt(val)
-            # Bold if closest to empirical
-            if closest[stock] == mc and s != r'--':
-                s = r'\textbf{' + s + '}'
-            row_vals.append(s)
+    def build_table(stock_indices, part_num, total_parts):
+        """Build LaTeX table for a subset of stocks."""
+        subset_stocks = [stocks[i] for i in stock_indices]
+        subset_df = df_var.iloc[stock_indices]
+        
+        lines = []
+        col_spec = 'l' + 'r' * len(subset_stocks)
+        
+        lines.append(r'\begin{table}[ht]')
+        lines.append(r'\centering')
+        lines.append(r'\small')
+        lines.append(r'\begin{tabular}{' + col_spec + r'}')
+        lines.append(r'\toprule')
+        
+        # Header
+        header = ['Model'] + [str(s) for s in subset_stocks]
+        lines.append(' & '.join(header) + r' \\')
+        lines.append(r'\midrule')
+        
+        # Empirical row
+        row_vals = [get_label(emp_col)]
+        for _, row in subset_df.iterrows():
+            row_vals.append(fmt(row[emp_col]))
         lines.append(' & '.join(row_vals) + r' \\')
+        
+        # Model rows
+        for mc in model_cols:
+            row_vals = [get_label(mc)]
+            for _, row in subset_df.iterrows():
+                stock = row['Stock']
+                val = row[mc]
+                s = fmt(val)
+                # Bold if closest to empirical
+                if closest[stock] == mc and s != r'--':
+                    s = r'\textbf{' + s + '}'
+                row_vals.append(s)
+            lines.append(' & '.join(row_vals) + r' \\')
+        
+        lines.append(r'\bottomrule')
+        lines.append(r'\end{tabular}')
+        
+        if total_parts > 1:
+            lines.append(r'\caption{1\% VaR (returns) for stocks ' + 
+                        f'{subset_stocks[0]}--{subset_stocks[-1]} (Part {part_num}/{total_parts}). ' +
+                        r'Empirical VaR in first row; bold = closest to empirical.}')
+            lines.append(r'\label{tab:var_1pct_part' + str(part_num) + r'}')
+        else:
+            lines.append(r'\caption{1\% VaR (returns) for each stock and model. '
+                        r'Empirical VaR in first row; bold values indicate the model '
+                        r'closest to the empirical VaR for each stock.}')
+            lines.append(r'\label{tab:var_1pct}')
+        
+        lines.append(r'\end{table}')
+        return '\n'.join(lines)
     
-    lines.append(r'\bottomrule')
-    lines.append(r'\end{tabular}')
-    lines.append(r'\caption{1\% VaR (returns) for each stock and model. '
-                 r'Empirical VaR in first row; bold values indicate the model '
-                 r'closest to the empirical VaR for each stock.}')
-    lines.append(r'\label{tab:var_1pct}')
-    lines.append(r'\end{table}')
+    # Split stocks into two groups
+    n_stocks = len(stocks)
+    part1_indices = list(range(min(split_at, n_stocks)))
+    part2_indices = list(range(split_at, n_stocks))
     
-    return '\n'.join(lines)
+    tables = []
+    tables.append(build_table(part1_indices, 1, 2))
+    if part2_indices:
+        tables.append(build_table(part2_indices, 2, 2))
+    
+    return '\n\n'.join(tables)
 
 # =============================================================================
 # LaTeX Model Comparison Table

@@ -35,19 +35,128 @@ def load_results(path="results.pkl"):
 # Density Plots
 # =============================================================================
 
-def plot_densities_for_stock(stock, densities_info, output_dir="."):
-    """Plot density comparison for a single stock."""
+import os
+
+def plot_first_stock_detailed(stock, densities_info, output_dir="."):
+    """
+    Create 3 detailed plots for the first stock:
+    1. Full distribution
+    2. Zoomed center 
+    3. Right-hand side tail
+    """
     data = densities_info['data']
     x_range = densities_info['x_range']
     densities = densities_info['densities']
     
-    fig, ax = plt.subplots(figsize=(14, 8))
-    
     # Kernel density estimate
+    kde = gaussian_kde(data)
+    
+    # Color palette for models
+    colors = sns.color_palette("husl", len(densities))
+    
+    paths = []
+    
+    # --- Plot 1: Full Distribution ---
+    fig, ax = plt.subplots(figsize=(14, 9))
+    
+    ax.plot(x_range, kde(x_range), 'k-', linewidth=2.5, label='Kernel Density', alpha=0.8)
+    
+    for i, (model_name, pdf_vals) in enumerate(densities.items()):
+        label = model_name.replace('_', ' ').replace('MixGauss K', 'Mix Gauss K=')
+        label = label.replace('WeightedChiSq K', 'Weighted χ² K=')
+        ax.plot(x_range, pdf_vals, '--', linewidth=1.8, color=colors[i], label=label, alpha=0.85)
+    
+    ax.set_xlabel('Return (%)', fontsize=13)
+    ax.set_ylabel('Density', fontsize=13)
+    ax.set_title(f'Fitted Distributions for Stock {stock} - Full Distribution', fontsize=15, fontweight='bold')
+    ax.legend(loc='upper right', fontsize=10, framealpha=0.9)
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    fig_path = f"{output_dir}/stock_{stock}_full.png"
+    plt.savefig(fig_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    paths.append(fig_path)
+    print(f"Saved: {fig_path}")
+    
+    # --- Plot 2: Zoomed Center ---
+    fig, ax = plt.subplots(figsize=(14, 9))
+    
+    # Zoom to center: typically between -2 and 2 std or similar
+    center_mask = (x_range >= -3) & (x_range <= 3)
+    x_center = x_range[center_mask]
+    
+    ax.plot(x_center, kde(x_center), 'k-', linewidth=2.5, label='Kernel Density', alpha=0.8)
+    
+    for i, (model_name, pdf_vals) in enumerate(densities.items()):
+        label = model_name.replace('_', ' ').replace('MixGauss K', 'Mix Gauss K=')
+        label = label.replace('WeightedChiSq K', 'Weighted χ² K=')
+        ax.plot(x_center, pdf_vals[center_mask], '--', linewidth=1.8, color=colors[i], label=label, alpha=0.85)
+    
+    ax.set_xlabel('Return (%)', fontsize=13)
+    ax.set_ylabel('Density', fontsize=13)
+    ax.set_title(f'Fitted Distributions for Stock {stock} - Center (Zoomed)', fontsize=15, fontweight='bold')
+    ax.legend(loc='upper right', fontsize=10, framealpha=0.9)
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(-3, 3)
+    
+    plt.tight_layout()
+    fig_path = f"{output_dir}/stock_{stock}_center.png"
+    plt.savefig(fig_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    paths.append(fig_path)
+    print(f"Saved: {fig_path}")
+    
+    # --- Plot 3: Right-Hand Side Tail ---
+    fig, ax = plt.subplots(figsize=(14, 9))
+    
+    # RHS tail: values > 1.5 std (approximately)
+    rhs_mask = x_range >= 1.5
+    x_rhs = x_range[rhs_mask]
+    
+    ax.plot(x_rhs, kde(x_rhs), 'k-', linewidth=2.5, label='Kernel Density', alpha=0.8)
+    
+    for i, (model_name, pdf_vals) in enumerate(densities.items()):
+        label = model_name.replace('_', ' ').replace('MixGauss K', 'Mix Gauss K=')
+        label = label.replace('WeightedChiSq K', 'Weighted χ² K=')
+        ax.plot(x_rhs, pdf_vals[rhs_mask], '--', linewidth=1.8, color=colors[i], label=label, alpha=0.85)
+    
+    ax.set_xlabel('Return (%)', fontsize=13)
+    ax.set_ylabel('Density', fontsize=13)
+    ax.set_title(f'Fitted Distributions for Stock {stock} - Right Tail', fontsize=15, fontweight='bold')
+    ax.legend(loc='upper right', fontsize=10, framealpha=0.9)
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    fig_path = f"{output_dir}/stock_{stock}_rhs_tail.png"
+    plt.savefig(fig_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    paths.append(fig_path)
+    print(f"Saved: {fig_path}")
+    
+    return paths
+
+
+def plot_stock_full(stock, densities_info, output_dir="stocks"):
+    """
+    Plot a single stock's full distribution with all model estimates.
+    Uses same styling as the first stock plots.
+    Saves to the stocks/ subdirectory.
+    """
+    data = densities_info['data']
+    x_range = densities_info['x_range']
+    densities = densities_info['densities']
+    
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
+    
+    fig, ax = plt.subplots(figsize=(14, 9))
+    
+    # Kernel density estimate of the data
     kde = gaussian_kde(data)
     ax.plot(x_range, kde(x_range), 'k-', linewidth=2.5, label='Kernel Density', alpha=0.8)
     
-    # Color palette for models
+    # Color palette for models - same as first stock
     colors = sns.color_palette("husl", len(densities))
     
     # Plot each model density
@@ -64,18 +173,18 @@ def plot_densities_for_stock(stock, densities_info, output_dir="."):
     
     plt.tight_layout()
     
-    # Save figure
-    fig_path = f"{output_dir}/density_stock_{stock}.png"
+    fig_path = f"{output_dir}/stock_{stock}.png"
     plt.savefig(fig_path, dpi=150, bbox_inches='tight')
     plt.close()
     
     return fig_path
 
+
 def plot_all_densities(all_densities, output_dir="."):
     """Plot densities for all stocks."""
     paths = []
     for stock, info in all_densities.items():
-        path = plot_densities_for_stock(stock, info, output_dir)
+        path = plot_stock_full(stock, info, output_dir)
         paths.append(path)
         print(f"Saved: {path}")
     return paths
@@ -196,26 +305,29 @@ def format_var_table(df_var):
     return pd.DataFrame(formatted_rows)
 
 def plot_var_heatmap(df_var, output_dir="."):
-    """Heatmap comparing VaR estimates across stocks and models."""
+    """Heatmap showing distance from empirical VaR for each model."""
     var_cols = [c for c in df_var.columns if c.startswith('VaR_')]
     
-    # Prepare data for heatmap
+    # Get empirical VaR for each stock
+    emp_var = df_var['Empirical_VaR'].values
+    
+    # Prepare data - compute absolute distance from empirical VaR
     var_data = df_var[var_cols].copy()
+    for i, col in enumerate(var_cols):
+        var_data[col] = np.abs(df_var[col].values - emp_var)
+    
     var_data.index = df_var['Stock']
     var_data.columns = [c.replace('VaR_', '').replace('_', ' ') for c in var_cols]
     
-    # Add empirical VaR
-    emp_var = df_var['Empirical_VaR'].values
-    var_data.insert(0, 'Empirical', emp_var)
-    
     fig, ax = plt.subplots(figsize=(16, 12))
     
-    sns.heatmap(var_data.T, annot=True, fmt='.2f', cmap='RdYlBu_r',
-                center=0, ax=ax, annot_kws={'size': 8})
+    # Use a colormap where lower values (closer to empirical) are better (darker/cooler)
+    sns.heatmap(var_data.T, annot=True, fmt='.3f', cmap='YlOrRd',
+                ax=ax, annot_kws={'size': 8})
     
     ax.set_xlabel('Stock', fontsize=12)
     ax.set_ylabel('Model', fontsize=12)
-    ax.set_title('1% VaR Comparison Across Stocks and Models', fontsize=14, fontweight='bold')
+    ax.set_title('Distance from Empirical 1% VaR (lower = closer to empirical)', fontsize=14, fontweight='bold')
     
     plt.tight_layout()
     fig_path = f"{output_dir}/var_heatmap.png"
@@ -248,10 +360,19 @@ def main():
     
     output_dir = "."
     
-    # Plot densities for first stock only (as per assignment)
+    # Plot 3 detailed views for the first stock
     first_stock = returns.columns[0]
-    print(f"\nPlotting density for Stock {first_stock}...")
-    plot_densities_for_stock(first_stock, all_densities[first_stock], output_dir)
+    print(f"\nPlotting detailed views for Stock {first_stock}...")
+    plot_first_stock_detailed(first_stock, all_densities[first_stock], output_dir)
+    
+    # Plot remaining 25 stocks with normal comparison, save to stocks/ folder
+    stocks_dir = os.path.join(output_dir, "stocks")
+    os.makedirs(stocks_dir, exist_ok=True)
+    print(f"\nPlotting remaining stocks with normal comparison to {stocks_dir}/...")
+    remaining_stocks = returns.columns[1:]
+    for stock in remaining_stocks:
+        path = plot_stock_full(stock, all_densities[stock], stocks_dir)
+        print(f"  Saved: {path}")
     
     # Create model comparison tables
     print("\nCreating model comparison tables...")
