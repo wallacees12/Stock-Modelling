@@ -37,8 +37,8 @@ warnings.filterwarnings('ignore')
 # =============================================================================
 # Constants
 # =============================================================================
-TMAX = 50.0   # Max t for characteristic function integration
-N_T = 2000    # Number of points in t-grid
+TMAX = 1000.0   # Max t for characteristic function integration
+N_T = 20000     # Number of points in t-grid
 ALPHA = 0.01  # VaR level (1%)
 
 # =============================================================================
@@ -160,11 +160,11 @@ def fit_mixture_gaussian(data, K):
 # =============================================================================
 
 def weighted_chisq_cf_grid_cpu(weights, location, t_grid):
-    """CPU version: Characteristic function of weighted chi-squared."""
-    phi = np.exp(1j * t_grid * location)
-    for w in weights:
-        phi *= (1 - 2j * t_grid * w) ** (-0.5)
-    return phi
+    """CPU version: Characteristic function of weighted chi-squared (log-form)."""
+    # log phi(t) = i*t*loc - 0.5 * sum(log(1 - 2*i*t*w))
+    z = 1 - 2j * np.outer(t_grid, weights)
+    log_phi = 1j * t_grid * location - 0.5 * np.sum(np.log(z), axis=1)
+    return np.exp(log_phi)
 
 def weighted_chisq_pdf_from_phi_cpu(x_array, phi, t_grid, dt):
     """CPU version: PDF via Gil-Pelaez formula."""
@@ -178,27 +178,51 @@ def weighted_chisq_pdf_from_phi_cpu(x_array, phi, t_grid, dt):
 
 if GPU_AVAILABLE:
     def weighted_chisq_cf_grid_gpu(weights, location, t_grid_gpu):
-        """GPU version: Characteristic function of weighted chi-squared."""
-        phi = cp.exp(1j * t_grid_gpu * location)
-        for w in weights:
-            phi *= (1 - 2j * t_grid_gpu * w) ** (-0.5)
-        return phi
+        """GPU version: Characteristic function of weighted chi-squared (log-form)."""
+        z = 1 - 2j * cp.outer(t_grid_gpu, weights)
+        log_phi = 1j * t_grid_gpu * location - 0.5 * cp.sum(cp.log(z), axis=1)
+        return cp.exp(log_phi)
     
     def weighted_chisq_pdf_from_phi_gpu(x_array, phi, t_grid_gpu, dt):
-        """GPU version: PDF via Gil-Pelaez formula."""
+        """GPU version: PDF via Gil-Pelaez formula (batched)."""
         x_gpu = cp.asarray(x_array)
-        phase = cp.exp(-1j * cp.outer(x_gpu, t_grid_gpu))
-        integrand = phase * phi
-        weights = cp.ones(len(t_grid_gpu))
+        n_data = len(x_gpu)
+        n_t = len(t_grid_gpu)
+        
+        # Process in batches to avoid OOM
+        # x_gpu (n_data) x t_grid_gpu (n_t) -> n_data * n_t * 16 bytes
+        # 8000 * 20000 * 16 = 2.5 GB. Should fit, but maybe overhead/fragmentation.
+        # Let's batch over x_array
+        batch_size = 1000 # Process 1000 data points at a time
+        pdf_vals = cp.zeros(n_data, dtype=cp.float64)
+        
+        weights = cp.ones(n_t)
         weights[0] = weights[-1] = 0.5
-        vals = cp.real(cp.sum(integrand * weights, axis=1) * dt)
-        return cp.asnumpy(vals) / np.pi
+        
+        for i in range(0, n_data, batch_size):
+            end = min(i + batch_size, n_data)
+            x_batch = x_gpu[i:end]
+            
+            # phase: (batch, n_t)
+            phase = cp.exp(-1j * cp.outer(x_batch, t_grid_gpu))
+            integrand = phase * phi # broadcast phi (n_t)
+            
+            # Sum over t
+            batch_vals = cp.real(cp.sum(integrand * weights, axis=1) * dt)
+            pdf_vals[i:end] = batch_vals
+            
+            # Free memory
+            del phase, integrand, batch_vals
+            cp.get_default_memory_pool().free_all_blocks()
+            
+        return cp.asnumpy(pdf_vals) / np.pi
 
 def weighted_chisq_cf_grid(weights, location):
     """Characteristic function computation (auto GPU/CPU)."""
     if GPU_AVAILABLE:
         t_grid_gpu = cp.asarray(t_grid)
-        return weighted_chisq_cf_grid_gpu(weights, location, t_grid_gpu), t_grid_gpu
+        weights_gpu = cp.asarray(weights)
+        return weighted_chisq_cf_grid_gpu(weights_gpu, location, t_grid_gpu), t_grid_gpu
     else:
         return weighted_chisq_cf_grid_cpu(weights, location, t_grid), t_grid
 
@@ -214,7 +238,9 @@ def weighted_chisq_loglik(params, data, K):
     weights = params[:K]
     location = params[K]
     
-    if np.any(weights <= 0) or np.any(weights > 100):
+    # Removed strict positivity check to allow negative weights
+    # But we might want to bound them to avoid extreme values
+    if np.any(np.abs(weights) > 100):
         return np.inf
     
     phi, t_arr = weighted_chisq_cf_grid(weights, location)
@@ -227,11 +253,20 @@ def weighted_chisq_loglik(params, data, K):
 
 def fit_weighted_chisq(data, K):
     """Fit weighted chi-squared model via MLE (FULL, GPU-accelerated)."""
-    weights_init = np.ones(K) / K
+    # Initialize with mix of positive and negative weights
+    K_half = K // 2
+    weights_init = np.concatenate([
+        -np.linspace(1, 0.5, K_half),
+        np.linspace(0.5, 1, K - K_half)
+    ])
+    weights_init /= np.std(weights_init) # Scaling
     location_init = np.mean(data)
     
     x0 = np.concatenate([weights_init, [location_init]])
-    bounds = [(1e-6, np.inf) for _ in range(K)] + [(-np.inf, np.inf)]
+    
+    # Bounds: allow negative weights
+    w_max = 10.0
+    bounds = [(-w_max, w_max) for _ in range(K)] + [(-np.inf, np.inf)]
     
     result = optimize.minimize(
         weighted_chisq_loglik,
@@ -239,7 +274,102 @@ def fit_weighted_chisq(data, K):
         args=(data, K),
         method='L-BFGS-B',
         bounds=bounds,
-        options={'maxiter': 100}
+        options={'maxiter': 1000}
+    )
+    return result.x, -result.fun
+
+# =============================================================================
+# Difference of Weighted Chi-Squared (K positive + K negative components)
+# =============================================================================
+
+def diff_weighted_chisq_cf_grid_cpu(weights_pos, weights_neg, location, t_grid):
+    """CPU version: CF for difference of weighted chi-squared.
+    
+    X = location + sum(a_i * Z_i^2) - sum(b_j * W_j^2)
+    where a_i > 0, b_j > 0, Z_i, W_j ~ N(0,1) iid.
+    
+    phi(t) = exp(it*loc) * prod((1-2it*a_i)^(-1/2)) * prod((1+2it*b_j)^(-1/2))
+    """
+    # Positive part: (1 - 2it*a)
+    z_pos = 1 - 2j * np.outer(t_grid, weights_pos)
+    # Negative part: (1 + 2it*b)
+    z_neg = 1 + 2j * np.outer(t_grid, weights_neg)
+    
+    # Log-form for stability
+    log_phi = (1j * t_grid * location 
+               - 0.5 * np.sum(np.log(z_pos), axis=1)
+               - 0.5 * np.sum(np.log(z_neg), axis=1))
+    return np.exp(log_phi)
+
+if GPU_AVAILABLE:
+    def diff_weighted_chisq_cf_grid_gpu(weights_pos, weights_neg, location, t_grid_gpu):
+        """GPU version: CF for difference of weighted chi-squared."""
+        z_pos = 1 - 2j * cp.outer(t_grid_gpu, weights_pos)
+        z_neg = 1 + 2j * cp.outer(t_grid_gpu, weights_neg)
+        
+        log_phi = (1j * t_grid_gpu * location
+                   - 0.5 * cp.sum(cp.log(z_pos), axis=1)
+                   - 0.5 * cp.sum(cp.log(z_neg), axis=1))
+        return cp.exp(log_phi)
+
+def diff_weighted_chisq_cf_grid(weights_pos, weights_neg, location):
+    """Characteristic function for difference model (auto GPU/CPU)."""
+    if GPU_AVAILABLE:
+        t_grid_gpu = cp.asarray(t_grid)
+        w_pos_gpu = cp.asarray(weights_pos)
+        w_neg_gpu = cp.asarray(weights_neg)
+        return diff_weighted_chisq_cf_grid_gpu(w_pos_gpu, w_neg_gpu, location, t_grid_gpu), t_grid_gpu
+    else:
+        return diff_weighted_chisq_cf_grid_cpu(weights_pos, weights_neg, location, t_grid), t_grid
+
+def diff_weighted_chisq_loglik(params, data, K):
+    """Negative log-likelihood for difference of weighted chi-squared.
+    
+    params: [w_pos_1..w_pos_K, w_neg_1..w_neg_K, location]
+    """
+    weights_pos = params[:K]
+    weights_neg = params[K:2*K]
+    location = params[2*K]
+    
+    # Enforce positivity for both weight sets
+    if np.any(weights_pos <= 0.01) or np.any(weights_neg <= 0.01):
+        return np.inf
+    if np.any(weights_pos > 100) or np.any(weights_neg > 100):
+        return np.inf
+    
+    phi, t_arr = diff_weighted_chisq_cf_grid(weights_pos, weights_neg, location)
+    pdf_vals = weighted_chisq_pdf_from_phi(data, phi, t_arr)
+    
+    if np.any(pdf_vals <= 0) or np.any(~np.isfinite(pdf_vals)):
+        return np.inf
+    
+    return -np.sum(np.log(pdf_vals))
+
+def fit_diff_weighted_chisq(data, K):
+    """Fit difference of weighted chi-squared model via MLE.
+    
+    K = number of positive weights = number of negative weights.
+    Total weights = 2*K, total params = 2*K + 1 (with location).
+    """
+    # Initialize weights based on data scale
+    scale = np.std(data) / np.sqrt(2 * K)
+    weights_pos_init = np.linspace(0.5, 1.5, K) * scale
+    weights_neg_init = np.linspace(0.5, 1.5, K) * scale
+    location_init = np.mean(data)
+    
+    x0 = np.concatenate([weights_pos_init, weights_neg_init, [location_init]])
+    
+    # Bounds: all weights must be positive
+    w_max = 10.0
+    bounds = [(0.01, w_max) for _ in range(2 * K)] + [(-np.inf, np.inf)]
+    
+    result = optimize.minimize(
+        diff_weighted_chisq_loglik,
+        x0=x0,
+        args=(data, K),
+        method='L-BFGS-B',
+        bounds=bounds,
+        options={'maxiter': 1000}
     )
     return result.x, -result.fun
 
@@ -310,6 +440,20 @@ def fit_all_models(data, stock_id):
             print(f"    Warning: Failed - {e}")
             results[f'WeightedChiSq_K{K}'] = {
                 'params': None, 'loglik': -np.inf, 'n_params': K + 1
+            }
+    
+    # Difference of Weighted Chi-Squared models (K positive + K negative)
+    for K in [3]:  # K=3 means 3+3=6 weights total
+        print(f"  Fitting Diff Weighted Chi-Squared (K={K}+{K})...")
+        try:
+            params, loglik = fit_diff_weighted_chisq(data, K)
+            results[f'DiffWeightedChiSq_K{K}'] = {
+                'params': params, 'loglik': loglik, 'n_params': 2 * K + 1
+            }
+        except Exception as e:
+            print(f"    Warning: Failed - {e}")
+            results[f'DiffWeightedChiSq_K{K}'] = {
+                'params': None, 'loglik': -np.inf, 'n_params': 2 * K + 1
             }
     
     print(f"  Fitting Noncentral t...")
@@ -399,31 +543,33 @@ def weighted_chisq_cdf_from_phi(x_array, phi, t_arr):
         vals = np.sum(integrand * w, axis=1) * dt
         return 0.5 - vals / np.pi
 
-def var_weighted_chisq(params, K, alpha=ALPHA):
-    """VaR for weighted chi-squared model."""
+def var_weighted_chisq(params, K, alpha=ALPHA, n_sim=100000):
+    """VaR for weighted chi-squared model via Monte Carlo simulation."""
     weights = np.asarray(params[:K])
     location = params[K]
     
-    phi, t_arr = weighted_chisq_cf_grid(weights, location)
+    # Simulate chi-squared(1) random variables and apply weights
+    np.random.seed(42)  # For reproducibility
+    chi2_samples = np.random.chisquare(df=1, size=(n_sim, K))
+    X = location + np.sum(weights * chi2_samples, axis=1)
     
-    def F(x):
-        return weighted_chisq_cdf_from_phi(np.array([x]), phi, t_arr)[0]
+    return np.percentile(X, alpha * 100)
+
+def var_diff_weighted_chisq(params, K, alpha=ALPHA, n_sim=100000):
+    """VaR for difference of weighted chi-squared model via Monte Carlo simulation."""
+    weights_pos = np.asarray(params[:K])
+    weights_neg = np.asarray(params[K:2*K])
+    location = params[2*K]
     
-    F_lo = F(location)
-    if not np.isfinite(F_lo):
-        return np.nan
-    if F_lo >= alpha:
-        return location
+    # Simulate chi-squared(1) random variables
+    np.random.seed(42)  # For reproducibility
+    chi2_pos = np.random.chisquare(df=1, size=(n_sim, K))
+    chi2_neg = np.random.chisquare(df=1, size=(n_sim, K))
     
-    hi = location + 1.0
-    for _ in range(20):
-        if F(hi) >= alpha:
-            break
-        hi = location + 2.0 * (hi - location)
-    else:
-        return hi
+    # X = location + sum(w_pos * chi2_pos) - sum(w_neg * chi2_neg)
+    X = location + np.sum(weights_pos * chi2_pos, axis=1) - np.sum(weights_neg * chi2_neg, axis=1)
     
-    return optimize.brentq(lambda q: F(q) - alpha, location, hi)
+    return np.percentile(X, alpha * 100)
 
 def var_nct(params, alpha=ALPHA):
     """VaR for noncentral t."""
@@ -449,6 +595,9 @@ def compute_var(data, model_results, alpha=ALPHA):
         elif name.startswith('WeightedChiSq_K'):
             K = int(name.split('K')[1])
             var_dict[name] = var_weighted_chisq(params, K, alpha)
+        elif name.startswith('DiffWeightedChiSq_K'):
+            K = int(name.split('K')[1])
+            var_dict[name] = var_diff_weighted_chisq(params, K, alpha)
         elif name == 'NCT':
             var_dict[name] = var_nct(params, alpha)
         else:
@@ -480,6 +629,13 @@ def evaluate_densities(x_range, model_results):
             location = params[K]
             phi, t_arr = weighted_chisq_cf_grid(weights, location)
             densities[name] = weighted_chisq_pdf_from_phi(x_range, phi, t_arr)
+        elif name.startswith('DiffWeightedChiSq_K'):
+            K = int(name.split('K')[1])
+            weights_pos = params[:K]
+            weights_neg = params[K:2*K]
+            location = params[2*K]
+            phi, t_arr = diff_weighted_chisq_cf_grid(weights_pos, weights_neg, location)
+            densities[name] = weighted_chisq_pdf_from_phi(x_range, phi, t_arr)
         elif name == 'NCT':
             densities[name] = nct_pdf(x_range, params[0], params[1], params[2], params[3])
     
@@ -489,19 +645,44 @@ def evaluate_densities(x_range, model_results):
 # Main Execution
 # =============================================================================
 
-def main():
-    print("=" * 60)
-    print("GPU-Accelerated Stock Model Fitting")
-    print("=" * 60)
+def one_stock(returns):
+    """Fit models for a single stock (first one)."""
+    col = returns.columns[0]
+    print(f"\n{'=' * 60}")
+    print(f"Fitting models for Stock {col} (Single Stock Mode)")
+    print(f"{'=' * 60}")
     
-    # Load data
-    data_path = "DJIA30stockreturns.csv"
-    print(f"\nLoading data from {data_path}...")
-    returns = pd.read_csv(data_path, header=None)
-    print(f"Data shape: {returns.shape}")
+    data = returns[col].values
+    n_obs = len(data)
+    
+    # Fit models
+    results = fit_all_models(data, col)
+    
+    # Compute AIC/BIC
+    for model in results:
+        loglik = results[model]['loglik']
+        n_params = results[model]['n_params']
+        aic, bic = compute_aic_bic(loglik, n_params, n_obs)
+        results[model]['AIC'] = aic
+        results[model]['BIC'] = bic
+        
+    # Compute VaR
+    print("\nComputing VaR...")
+    var_dict = compute_var(data, results, alpha=ALPHA)
+    
+    print("\nResults Summary:")
+    print(f"{'Model':<20} {'LogLik':<12} {'AIC':<12} {'BIC':<12} {'VaR (1%)':<12}")
+    print("-" * 70)
+    
+    emp_var = var_dict['Empirical']
+    print(f"{'Empirical':<20} {'-':<12} {'-':<12} {'-':<12} {emp_var:.4f}")
+    
+    for model, res in results.items():
+        print(f"{model:<20} {res['loglik']:.2f}        {res['AIC']:.2f}        {res['BIC']:.2f}        {var_dict[model]:.4f}")
+
+def all_stock(returns):
+    """Fit models for all stocks and save results."""
     n_obs = len(returns)
-    
-    # Fit all models to all stocks
     all_results = {}
     all_densities = {}
     
@@ -603,6 +784,22 @@ def main():
     
     print("\n\nVaR (1%) table:")
     print(df_var.to_string(index=False))
+
+def main():
+    print("=" * 60)
+    print("GPU-Accelerated Stock Model Fitting")
+    print("=" * 60)
+    
+    # Load data
+    data_path = "DJIA30stockreturns.csv"
+    print(f"\nLoading data from {data_path}...")
+    returns = pd.read_csv(data_path, header=None)
+    print(f"Data shape: {returns.shape}")
+    
+    # Choose mode
+    # one_stock(returns)
+    
+    all_stock(returns)
 
 if __name__ == "__main__":
     main()

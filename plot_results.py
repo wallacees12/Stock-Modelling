@@ -194,7 +194,7 @@ def plot_all_densities(all_densities, output_dir="."):
 # =============================================================================
 
 def create_model_comparison_table(all_results, returns):
-    """Create table showing best model by LogLik, AIC, BIC for each stock."""
+    """Create table showing best model by LogLik, AIC, BIC for each stock with values."""
     rows = []
     
     for stock in returns.columns:
@@ -215,11 +215,19 @@ def create_model_comparison_table(all_results, returns):
         best_aic = min(valid_aics, key=valid_aics.get) if valid_aics else 'N/A'
         best_bic = min(valid_bics, key=valid_bics.get) if valid_bics else 'N/A'
         
+        # Get values for best models
+        best_loglik_val = valid_logliks.get(best_loglik, np.nan) if best_loglik != 'N/A' else np.nan
+        best_aic_val = valid_aics.get(best_aic, np.nan) if best_aic != 'N/A' else np.nan
+        best_bic_val = valid_bics.get(best_bic, np.nan) if best_bic != 'N/A' else np.nan
+        
         rows.append({
             'Stock': stock,
             'Best (LogLik)': best_loglik,
+            'LogLik Value': f"{best_loglik_val:.2f}" if np.isfinite(best_loglik_val) else '--',
             'Best (AIC)': best_aic,
-            'Best (BIC)': best_bic
+            'AIC Value': f"{best_aic_val:.2f}" if np.isfinite(best_aic_val) else '--',
+            'Best (BIC)': best_bic,
+            'BIC Value': f"{best_bic_val:.2f}" if np.isfinite(best_bic_val) else '--'
         })
     
     return pd.DataFrame(rows)
@@ -272,6 +280,73 @@ def plot_model_frequency_chart(comparison_df, output_dir="."):
     print(f"Saved: {fig_path}")
     return fig_path
 
+def plot_chisq_comparison(stock, densities_info, output_dir="."):
+    """
+    Compare WeightedChiSq and DiffWeightedChiSq models for a stock.
+    Shows the difference in how these models fit the data.
+    """
+    data = densities_info['data']
+    x_range = densities_info['x_range']
+    densities = densities_info['densities']
+    
+    # Filter for chi-squared models only
+    weighted_models = {k: v for k, v in densities.items() if k.startswith('WeightedChiSq_K')}
+    diff_models = {k: v for k, v in densities.items() if k.startswith('DiffWeightedChiSq_K')}
+    
+    if not weighted_models and not diff_models:
+        return None
+    
+    # Kernel density estimate
+    kde = gaussian_kde(data)
+    
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+    
+    # --- Left Panel: WeightedChiSq (negative weights allowed) ---
+    ax1 = axes[0]
+    ax1.plot(x_range, kde(x_range), 'k-', linewidth=2.5, label='Kernel Density', alpha=0.8)
+    
+    colors_w = sns.color_palette("Blues_d", len(weighted_models))
+    for i, (model_name, pdf_vals) in enumerate(weighted_models.items()):
+        K = model_name.split('K')[1]
+        label = f'Weighted χ² K={K}'
+        # Clip negative values for plotting (numerical artifacts)
+        pdf_clipped = np.clip(pdf_vals, 0, None)
+        ax1.plot(x_range, pdf_clipped, '--', linewidth=1.8, color=colors_w[i], label=label, alpha=0.85)
+    
+    ax1.set_xlabel('Return (%)', fontsize=13)
+    ax1.set_ylabel('Density', fontsize=13)
+    ax1.set_title(f'Weighted Chi-Squared (neg weights allowed)', fontsize=13, fontweight='bold')
+    ax1.legend(loc='upper right', fontsize=10, framealpha=0.9)
+    ax1.grid(True, alpha=0.3)
+    ax1.set_ylim(bottom=0)
+    
+    # --- Right Panel: DiffWeightedChiSq (positive weights, sign in CF) ---
+    ax2 = axes[1]
+    ax2.plot(x_range, kde(x_range), 'k-', linewidth=2.5, label='Kernel Density', alpha=0.8)
+    
+    colors_d = sns.color_palette("Oranges_d", len(diff_models))
+    for i, (model_name, pdf_vals) in enumerate(diff_models.items()):
+        K = model_name.split('K')[1]
+        label = f'Diff Weighted χ² K={K}+{K}'
+        pdf_clipped = np.clip(pdf_vals, 0, None)
+        ax2.plot(x_range, pdf_clipped, '--', linewidth=1.8, color=colors_d[i], label=label, alpha=0.85)
+    
+    ax2.set_xlabel('Return (%)', fontsize=13)
+    ax2.set_ylabel('Density', fontsize=13)
+    ax2.set_title(f'Difference of Weighted Chi-Squared', fontsize=13, fontweight='bold')
+    ax2.legend(loc='upper right', fontsize=10, framealpha=0.9)
+    ax2.grid(True, alpha=0.3)
+    ax2.set_ylim(bottom=0)
+    
+    fig.suptitle(f'Chi-Squared Model Comparison for Stock {stock}', fontsize=15, fontweight='bold', y=1.02)
+    
+    plt.tight_layout()
+    fig_path = f"{output_dir}/stock_{stock}_chisq_comparison.png"
+    plt.savefig(fig_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved: {fig_path}")
+    return fig_path
+
 # =============================================================================
 # VaR Table
 # =============================================================================
@@ -305,7 +380,7 @@ def format_var_table(df_var):
     return pd.DataFrame(formatted_rows)
 
 def plot_var_heatmap(df_var, output_dir="."):
-    """Heatmap showing distance from empirical VaR for each model."""
+    """Heatmap showing distance from empirical VaR for each model, with best model highlighted."""
     var_cols = [c for c in df_var.columns if c.startswith('VaR_')]
     
     # Get empirical VaR for each stock
@@ -319,15 +394,35 @@ def plot_var_heatmap(df_var, output_dir="."):
     var_data.index = df_var['Stock']
     var_data.columns = [c.replace('VaR_', '').replace('_', ' ') for c in var_cols]
     
-    fig, ax = plt.subplots(figsize=(16, 12))
+    # Find minima per stock (axis=1 for each row)
+    min_per_stock = var_data.idxmin(axis=1)  # Model name with minimum distance
     
-    # Use a colormap where lower values (closer to empirical) are better (darker/cooler)
-    sns.heatmap(var_data.T, annot=True, fmt='.3f', cmap='YlOrRd',
-                ax=ax, annot_kws={'size': 8})
+    fig, ax = plt.subplots(figsize=(18, 10))
     
-    ax.set_xlabel('Stock', fontsize=12)
-    ax.set_ylabel('Model', fontsize=12)
-    ax.set_title('Distance from Empirical 1% VaR (lower = closer to empirical)', fontsize=14, fontweight='bold')
+    # Transposed view (models on y-axis, stocks on x-axis)
+    heatmap_data = var_data.T
+    
+    # Use a diverging colormap - green for low (good), red for high (bad)
+    sns.heatmap(heatmap_data, annot=True, fmt='.2f', cmap='RdYlGn_r',
+                ax=ax, annot_kws={'size': 9, 'weight': 'bold'},
+                linewidths=0.5, linecolor='white',
+                cbar_kws={'label': 'Absolute Distance from Empirical VaR', 'shrink': 0.8})
+    
+    # Add thick borders around the best model for each stock
+    from matplotlib.patches import Rectangle
+    for stock_idx, stock in enumerate(var_data.index):
+        best_model = min_per_stock[stock]
+        model_idx = list(heatmap_data.index).index(best_model)
+        
+        # Draw a thick rectangle border around the best cell
+        rect = Rectangle((stock_idx, model_idx), 1, 1, 
+                         fill=False, edgecolor='blue', linewidth=3)
+        ax.add_patch(rect)
+    
+    ax.set_xlabel('Stock', fontsize=13, fontweight='bold')
+    ax.set_ylabel('Model', fontsize=13, fontweight='bold')
+    ax.set_title('Distance from Empirical 1% VaR\n(Green = Close, Red = Far, Blue Border = Best per Stock)', 
+                 fontsize=14, fontweight='bold')
     
     plt.tight_layout()
     fig_path = f"{output_dir}/var_heatmap.png"
@@ -364,6 +459,10 @@ def main():
     first_stock = returns.columns[0]
     print(f"\nPlotting detailed views for Stock {first_stock}...")
     plot_first_stock_detailed(first_stock, all_densities[first_stock], output_dir)
+    
+    # Plot chi-squared model comparison for first stock
+    print(f"\nPlotting chi-squared model comparison for Stock {first_stock}...")
+    plot_chisq_comparison(first_stock, all_densities[first_stock], output_dir)
     
     # Plot remaining 25 stocks with normal comparison, save to stocks/ folder
     stocks_dir = os.path.join(output_dir, "stocks")
